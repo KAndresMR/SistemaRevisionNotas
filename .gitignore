@@ -1,0 +1,32 @@
+# Archivos temporales y de sistema operativo
+.DS_Store
+*.swp
+*~
+
+# Entorno virtual de Python
+.venv/
+venv/
+env/
+ENV/
+
+# Caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+
+# Carpetas de datos locales (NO subir Excel reales de estudiantes por privacidad)
+NuevasNotas/
+PrimeraPasada/
+*.xlsx
+*.xls
+*.csv
+
+# Excepción: si quieres subir un archivo Excel de ejemplo o plantilla de pruebas, 
+# puedes descomentar la siguiente línea y poner el nombre exacto de tu archivo:
+# !plantilla_ejemplo.xlsx
+
+# Archivos de logs
+*.log
