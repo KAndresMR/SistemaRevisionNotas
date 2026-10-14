@@ -1,22 +1,25 @@
 
 
-# ========================================
-# models.py
-# ========================================
-
 """
-models.py
-=========
-
-Estructuras de datos usadas a través de todo el sistema.
-
-Se usan `dataclasses` (no dicts sueltos) para que el resto del código
-tenga autocompletado, tipado, y sea explícito sobre qué información
-viaja entre módulos.
+auditor.py
+==========
+Módulo central de auditoría de calificaciones:
+- Estructuras de datos (Student, MatchResult, StudentAuditRow)
+- Normalización de nombres de estudiantes
+- Emparejamiento inteligente de nómina (matching por posición + fuzzy matching para desfases)
+- Comparación matemática de calificaciones aplicando tolerancia
 """
 
+import difflib
+import logging
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
+
+from config import RELEVANT_SUBJECTS, SUBJECT_DISPLAY_NAMES, TOLERANCE
+
+logger = logging.getLogger(__name__)
 
 
 class GradeStatus(str, Enum):
@@ -30,6 +33,7 @@ class StudentMatchStatus(str, Enum):
     """Estado del emparejamiento de un estudiante entre ambos archivos."""
     MATCHED_BY_POSITION = "MATCHED_BY_POSITION"      # misma posición, mismo nombre normalizado
     MATCHED_BY_NAME = "MATCHED_BY_NAME"              # desfase de posición, encontrado por nombre
+    MATCHED_WITH_TYPO = "MATCHED_WITH_TYPO"          # encontrado con similitud difusa (typo)
     ONLY_IN_TEACHERS = "ONLY_IN_TEACHERS"            # existe solo en el Excel de docentes
     ONLY_IN_OFFICIAL = "ONLY_IN_OFFICIAL"            # existe solo en el Excel oficial
 
@@ -79,7 +83,7 @@ class ComparisonResult:
     subject_display: str
     teacher_grade: float | None
     official_grade: float | None
-    difference: float | None
+    difference: float | str | None
     status: GradeStatus
 
 
@@ -110,32 +114,11 @@ class StudentAuditRow:
     def has_desfase(self) -> bool:
         return self.match_status in (
             StudentMatchStatus.MATCHED_BY_NAME,
+            StudentMatchStatus.MATCHED_WITH_TYPO,
             StudentMatchStatus.ONLY_IN_TEACHERS,
             StudentMatchStatus.ONLY_IN_OFFICIAL,
         )
 
-
-# ========================================
-# name_normalizer.py
-# ========================================
-
-"""
-name_normalizer.py
-===================
-
-Normalización de nombres de estudiantes.
-
-Objetivo: que "JUAN PÉREZ", "Juan Pérez" y "juan   perez " se consideren
-el mismo estudiante al hacer matching, sin afectar el nombre que se
-muestra en el reporte final (para eso se conserva raw_name aparte).
-
-Esta función se llama UNA SOLA VEZ por estudiante al momento de leer
-cada archivo (ver excel_reader.py), nunca dentro de un bucle de
-comparación repetida.
-"""
-
-import unicodedata
-import re
 
 def normalize_name(raw_name: str) -> str:
     """
@@ -164,47 +147,6 @@ def normalize_name(raw_name: str) -> str:
     return text
 
 
-# ========================================
-# matcher.py
-# ========================================
-
-"""
-matcher.py
-==========
-
-Empareja estudiantes entre el archivo de docentes y el archivo oficial.
-
-Estrategia (en este orden):
-
-    1. RUTA RÁPIDA — comparación por posición/índice (O(n)):
-       teachers[i] vs official[i]. Si el nombre normalizado coincide,
-       es un match directo y NO se hace ninguna búsqueda adicional.
-
-    2. VALIDACIÓN DE SEGURIDAD — si los nombres en la misma posición NO
-       coinciden, nunca se asume que son "la misma persona en distinto
-       orden de columnas": se marca como posible desfase y se pasa a
-       la ruta secundaria.
-
-    3. RUTA SECUNDARIA (solo cuando hace falta) — se construye, la
-       PRIMERA vez que se necesita (no antes), un diccionario
-       {nombre_normalizado: Student} del archivo oficial. Esto cuesta
-       O(n) una sola vez y cada búsqueda posterior es O(1), en vez de
-       recorrer la lista completa por cada estudiante desfasado.
-
-Al final, cualquier estudiante que:
-    - solo existe en docentes           -> ONLY_IN_TEACHERS
-    - solo existe en el sistema         -> ONLY_IN_OFFICIAL
-    - fue encontrado por nombre (no por posición) -> MATCHED_BY_NAME
-queda marcado explícitamente. Nunca se "arrastra" una comparación de
-notas entre dos estudiantes que en realidad no son la misma persona.
-"""
-
-import logging
-
-
-logger = logging.getLogger(__name__)
-
-
 def match_students(teachers: list[Student], official: list[Student]) -> list[MatchResult]:
     results: list[MatchResult] = []
     matched_official_row_indices: set[int] = set()
@@ -223,11 +165,35 @@ def match_students(teachers: list[Student], official: list[Student]) -> list[Mat
             )
         return official_by_name
 
-    def try_match_by_name(teacher: Student) -> Student | None:
+    def try_match_by_name(teacher: Student) -> tuple[Student | None, StudentMatchStatus | None]:
         candidate = get_official_by_name().get(teacher.normalized_name)
         if candidate is not None and candidate.row_index not in matched_official_row_indices:
-            return candidate
-        return None
+            return candidate, StudentMatchStatus.MATCHED_BY_NAME
+            
+        # Fallback: Fuzzy matching optimizado
+        best_match = None
+        best_score = 0.0
+        t_norm = teacher.normalized_name
+        
+        for name, off_student in get_official_by_name().items():
+            if off_student.row_index in matched_official_row_indices:
+                continue
+            
+            # Filtro rápido O(len) antes de calcular matriz completa
+            matcher = difflib.SequenceMatcher(None, t_norm, name)
+            if matcher.quick_ratio() < 0.80:
+                continue
+
+            score = matcher.ratio()
+            if score > best_score:
+                best_score = score
+                best_match = off_student
+                
+        # Tolerancia de 85% para typos
+        if best_match is not None and best_score >= 0.85:
+            return best_match, StudentMatchStatus.MATCHED_WITH_TYPO
+            
+        return None, None
 
     n = min(len(teachers), len(official))
 
@@ -242,18 +208,18 @@ def match_students(teachers: list[Student], official: list[Student]) -> list[Mat
             continue
 
         # Nombres distintos en la misma posición: NO se asume coincidencia.
-        match = try_match_by_name(teacher)
+        match, status = try_match_by_name(teacher)
         if match is not None:
-            results.append(MatchResult(teacher, match, StudentMatchStatus.MATCHED_BY_NAME))
+            results.append(MatchResult(teacher, match, status))
             matched_official_row_indices.add(match.row_index)
         else:
             results.append(MatchResult(teacher, None, StudentMatchStatus.ONLY_IN_TEACHERS))
 
     # --- Docentes con más filas que el archivo oficial (cola sobrante) ---
     for teacher in teachers[n:]:
-        match = try_match_by_name(teacher)
+        match, status = try_match_by_name(teacher)
         if match is not None:
-            results.append(MatchResult(teacher, match, StudentMatchStatus.MATCHED_BY_NAME))
+            results.append(MatchResult(teacher, match, status))
             matched_official_row_indices.add(match.row_index)
         else:
             results.append(MatchResult(teacher, None, StudentMatchStatus.ONLY_IN_TEACHERS))
@@ -276,28 +242,7 @@ def match_students(teachers: list[Student], official: list[Student]) -> list[Mat
     return results
 
 
-# ========================================
-# comparator.py
-# ========================================
 
-"""
-comparator.py
-=============
-
-Aplica la regla de tolerancia (config.TOLERANCE) a los pares de
-estudiantes ya emparejados por matcher.py, y produce un StudentAuditRow
-por estudiante con el detalle de cada materia.
-
-Este módulo NO sabe nada de Excel, colores ni resaltado — solo hace la
-matemática de la comparación. Eso permite probarlo de forma aislada
-(ver test_comparator.py) sin tocar archivos.
-"""
-
-import logging
-
-from config import RELEVANT_SUBJECTS, SUBJECT_DISPLAY_NAMES, TOLERANCE
-
-logger = logging.getLogger(__name__)
 
 
 def _to_float(value: object) -> float | None:
@@ -338,18 +283,41 @@ def _compare_subject(
     official_grade = _to_float(official_raw)
     display_name = SUBJECT_DISPLAY_NAMES.get(subject_key, subject_key)
 
-    if teacher_grade is None or official_grade is None:
+    # Caso 1: Ambos vacíos -> Sin dato legítimo (no hay nota registrada en ninguna fuente)
+    if teacher_grade is None and official_grade is None:
         return ComparisonResult(
             subject_key=subject_key,
             subject_display=display_name,
-            teacher_grade=teacher_grade,
-            official_grade=official_grade,
+            teacher_grade=None,
+            official_grade=None,
             difference=None,
             status=GradeStatus.SIN_DATO,
         )
 
+    # Caso 2: Falta nota en docente pero sí existe en sistema oficial
+    if teacher_grade is None and official_grade is not None:
+        return ComparisonResult(
+            subject_key=subject_key,
+            subject_display=display_name,
+            teacher_grade=None,
+            official_grade=official_grade,
+            difference="Falta nota en Docente",
+            status=GradeStatus.ERROR,
+        )
+
+    # Caso 3: Docente tiene nota pero falta en sistema oficial
+    if teacher_grade is not None and official_grade is None:
+        return ComparisonResult(
+            subject_key=subject_key,
+            subject_display=display_name,
+            teacher_grade=teacher_grade,
+            official_grade=None,
+            difference="Falta nota en Sistema",
+            status=GradeStatus.ERROR,
+        )
+
+    # Caso 4: Ambos tienen nota numérica -> Comparación matemática con tolerancia
     # round() evita ruido de punto flotante (p. ej. 0.020000000000003)
-    # antes de comparar contra la tolerancia.
     difference = round(abs(teacher_grade - official_grade), 4)
     status = GradeStatus.OK if difference <= tolerance else GradeStatus.ERROR
 

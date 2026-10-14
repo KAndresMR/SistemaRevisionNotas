@@ -205,3 +205,31 @@ VESPERTINA_MAP: dict[str, tuple[str, str]] = {
 }
 
 FULL_MAP = {**MATUTINA_MAP, **VESPERTINA_MAP}
+
+import os
+from pathlib import Path
+
+
+def get_school_logo_path() -> str | None:
+    """
+    Localiza automáticamente el archivo 'logoEscuela.png' en el proyecto sin necesidad de pasarle una ruta.
+    Prioriza:
+    1. Raíz del espacio de trabajo.
+    2. Directorios superiores relativos (files/ o files/src/).
+    3. Directorio de trabajo actual (CWD).
+    """
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir.parent.parent / "logoEscuela.png",  # Raíz del proyecto
+        script_dir.parent / "logoEscuela.png",         # Carpeta files/
+        script_dir / "logoEscuela.png",                # Carpeta src/
+        Path.cwd() / "logoEscuela.png",                # Directorio actual
+        Path("logoEscuela.png"),
+    ]
+    for cand in candidates:
+        try:
+            if cand.is_file() and cand.stat().st_size > 0:
+                return str(cand.resolve())
+        except (OSError, ValueError):
+            continue
+    return None

@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 def run_audit(
     teacher_file: str,
     official_file: str,
-    output_file: str,
     course_name: str | None = None,
     teacher_sheet: str | None = None,
     official_sheet: str | None = None,
@@ -35,25 +34,16 @@ def run_audit(
     skip_mark_teacher: bool = False,
     reset_marked_teacher: bool = False,
     template_file: str | None = None,
-) -> str | None:
+    fix_errors: bool = False,
+    output_file: str | None = None,
+) -> tuple[str | None, list, str]:
     """
     Ejecuta la auditoría completa para un curso:
-    1. Genera el Excel de reporte en `output_file`.
-    2. Colorea los estudiantes y notas con error en el archivo de docentes,
-       guardándolo por defecto como copia marcada (`<nombre>_marcado.xlsx`).
+    1. Lee y empareja estudiantes entre el archivo oficial y el del docente.
+    2. Compara notas aplicando la tolerancia configurada.
+    3. Marca visualmente los errores en el archivo de docentes (o corrige notas si fix_errors=True).
 
-    course_name: nombre opcional del curso (p. ej. "8A Matutino"), usado
-                 como nombre de la hoja principal del reporte.
-    teacher_sheet / official_sheet: nombre de hoja a leer dentro de cada
-                 archivo de entrada, si no es la hoja activa por defecto.
-    teacher_marked_output: ruta personalizada para el archivo de docentes marcado.
-                           Si no se indica, se usa `<teacher_file>_marcado.xlsx`.
-    skip_mark_teacher: si es True, omite el marcado del archivo de docentes.
-    reset_marked_teacher: si es True, inicia el archivo marcado desde cero en lugar de acumular.
-    template_file: ruta al libro plantilla consolidado (ej. BS consolidado) para inicializar
-                   el archivo marcado cuando el curso proviene de un archivo individual.
-
-    Devuelve la ruta del archivo de docentes marcado (o None si se omitió).
+    Devuelve (ruta_marcada, audit_rows, actual_sheet).
     """
     logger.info("=== Iniciando auditoría%s ===", f" — {course_name}" if course_name else "")
 
@@ -74,11 +64,12 @@ def run_audit(
             teacher_file=teacher_file,
             output_file=teacher_marked_output,
             audit_rows=audit_rows,
-            sheet_name=actual_sheet, # Usamos la pestaña que el algoritmo descubrió realmente
+            sheet_name=actual_sheet,
             reset_marked=reset_marked_teacher,
             template_file=template_file,
+            fix_errors=fix_errors,
         )
         marked_path = teacher_marked_output
 
     logger.info("=== Auditoría finalizada%s ===", f" — {course_name}" if course_name else "")
-    return marked_path, audit_rows
+    return marked_path, audit_rows, actual_sheet

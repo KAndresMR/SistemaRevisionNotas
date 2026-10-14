@@ -30,6 +30,7 @@ reportarse como un error CLARO (no fallar silenciosamente) para poder
 ajustar la detección en la siguiente iteración.
 """
 
+import difflib
 import logging
 import os
 from openpyxl import load_workbook
@@ -73,36 +74,6 @@ def _cell_text(value) -> str:
     return normalize_name(str(value))
 
 
-def _find_flat_header_row(ws: Worksheet, required_columns: list[str]) -> tuple[int, dict[str, int]]:
-    """
-    Busca, dentro de las primeras MAX_HEADER_SEARCH_ROWS filas, la fila que
-    contiene TODAS las columnas de `required_columns` (comparación
-    normalizada). Devuelve (número_de_fila, {nombre_columna: índice_columna}).
-
-    Usado para el archivo de docentes, que tiene un único nivel de encabezado.
-    """
-    required_normalized = [normalize_name(c) for c in required_columns]
-
-    for row_idx in range(1, MAX_HEADER_SEARCH_ROWS + 1):
-        row_values = {
-            _cell_text(cell.value): cell.column
-            for cell in ws[row_idx]
-            if cell.value is not None
-        }
-        if all(req in row_values for req in required_normalized):
-            column_map = {
-                original: row_values[normalize_name(original)]
-                for original in required_columns
-            }
-            return row_idx, column_map
-
-    raise ExcelStructureError(
-        f"No se encontró una fila de encabezado (dentro de las primeras "
-        f"{MAX_HEADER_SEARCH_ROWS} filas) que contenga todas las columnas: "
-        f"{required_columns}"
-    )
-
-
 def _find_first_matching_column(
     ws: Worksheet, header_row: int, candidates: tuple[str, ...]
 ) -> int:
@@ -116,8 +87,6 @@ def _find_first_matching_column(
         f"No se encontró ninguna columna llamada {candidates} en la fila {header_row}."
     )
 
-
-import difflib
 
 def _find_teacher_columns(ws: Worksheet) -> tuple[int, int, dict[str, int]]:
     """
@@ -392,6 +361,12 @@ def read_official_file(path: str, sheet_name: str | None = None) -> list[Student
                 f"dentro de las primeras {MAX_HEADER_SEARCH_ROWS} filas del archivo oficial."
             )
 
+        if grade_header_row <= 1:
+            raise ExcelStructureError(
+                f"Estructura del archivo oficial inválida: la fila de notas ({grade_header_row}) "
+                f"no tiene espacio para la fila superior de materias."
+            )
+
         # 2. La fila de nombres de materia se asume inmediatamente arriba.
         subject_name_row = grade_header_row - 1
         column_to_subject = _build_subject_header_map(ws, subject_name_row)
@@ -460,11 +435,21 @@ def read_official_file(path: str, sheet_name: str | None = None) -> list[Student
         students: list[Student] = []
         row_index = 0
         for row in ws.iter_rows(min_row=grade_header_row + 1):
+            if len(row) < student_col:
+                continue
+
             name_cell = row[student_col - 1]
             if name_cell.value is None or str(name_cell.value).strip() == "":
                 continue
 
-            raw_name = str(name_cell.value)
+            raw_name = str(name_cell.value).strip()
+            norm_name = normalize_name(raw_name)
+
+            # Descartar filas de resumen o firmas (Promedios, Rector, etc.)
+            if any(kw in norm_name for kw in KEYWORDS_TO_IGNORE_IN_STUDENTS):
+                logger.debug("Fila ignorada en archivo oficial por palabra clave de resumen: '%s'", raw_name)
+                continue
+
             grades: dict[str, object] = {}
             for subject_key in RELEVANT_SUBJECTS:
                 col_idx = subject_final_col.get(subject_key)
@@ -476,12 +461,13 @@ def read_official_file(path: str, sheet_name: str | None = None) -> list[Student
             students.append(
                 Student(
                     raw_name=raw_name,
-                    normalized_name=normalize_name(raw_name),
+                    normalized_name=norm_name,
                     row_index=row_index,
                     grades=grades,
                 )
             )
             row_index += 1
+
 
         logger.info("Archivo oficial: %d estudiantes leídos.", len(students))
         return students
